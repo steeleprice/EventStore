@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using EventStore.Core.Bus;
 using EventStore.Core.Messages;
@@ -13,6 +14,7 @@ using EventStore.Core.Data;
 using EventStore.Common.Utils;
 using EventStore.Core.Authorization;
 using EventStore.Transport.Http.Atom;
+using Microsoft.Extensions.Primitives;
 using ILogger = Serilog.ILogger;
 
 namespace EventStore.Core.Services.Transport.Http.Controllers {
@@ -21,7 +23,7 @@ namespace EventStore.Core.Services.Transport.Http.Controllers {
 		private readonly IPublisher _networkSendQueue;
 		private const int DefaultNumberOfMessagesToGet = 1;
 		private static readonly ICodec[] DefaultCodecs = {Codec.Json, Codec.Xml};
-
+		public static readonly char[] ETagSeparatorArray = { ';' };
 		private static readonly ICodec[] AtomCodecs = {
 			Codec.CompetingXml,
 			Codec.CompetingJson,
@@ -63,6 +65,49 @@ namespace EventStore.Core.Services.Transport.Http.Controllers {
 				WithParameters(Operations.Subscriptions.ProcessMessages), AckMessages);
 			RegisterUrlBased(service, "/subscriptions/{stream}/{subscription}/nack?ids={messageids}&action={action}",
 				HttpMethod.Post, WithParameters(Operations.Subscriptions.ProcessMessages), NackMessages);
+			//map view parked messages
+			Register(service, "/subscriptions/viewparkedmessages/{stream}/{group}", HttpMethod.Get,
+				ViewParkedMessages, Codec.NoCodecs, AtomCodecs, WithParameters(Operations.Subscriptions.ProcessMessages));
+		}
+
+		private void ViewParkedMessages(HttpEntityManager http, UriTemplateMatch match) {
+			//var stream = Uri.EscapeDataString(match.BoundVariables["stream"]);
+			//var groupname = Uri.EscapeDataString(match.BoundVariables["group"]);
+			var stream = match.BoundVariables["stream"];
+			var groupname = match.BoundVariables["group"];
+
+			var parkedMessageUri = MakeUrl(http,
+				string.Format(parkedMessageUriTemplate, stream, groupname));
+
+			stream = "$persistentsubscription" + stream + "::" + groupname+"-parked";
+			
+			Log.Information("parked message uri {parkedMessageUri}.", parkedMessageUri);
+			Log.Information("stream {stream}.", stream);
+			var envelope = new SendToHttpEnvelope(_networkSendQueue,
+				http,
+				(ent, msg) =>
+					Format.GetStreamEventsBackward(ent, msg, EmbedLevel.None, true),
+				(args, msg) => Configure.GetStreamEventsBackward(args, msg, true));
+			var corrId = Guid.NewGuid();
+			Publish(new ClientMessage.ReadStreamEventsBackward(corrId, corrId, envelope, stream, 0, AtomSpecs.FeedPageSize,
+				true, true, GetETagStreamVersion(http), http.User));
+		}
+		private long? GetETagStreamVersion(HttpEntityManager manager) {
+			var etag = manager.HttpEntity.Request.GetHeaderValues("If-None-Match");
+			if (!StringValues.IsNullOrEmpty(etag)) {
+				// etag format is version;contenttypehash
+				var splitted = etag.ToString().Trim('\"').Split(ETagSeparatorArray);
+				if (splitted.Length == 2) {
+					var typeHash = manager.ResponseCodec.ContentType.GetHashCode()
+						.ToString(CultureInfo.InvariantCulture);
+					var res = splitted[1] == typeHash && long.TryParse(splitted[0], out var streamVersion)
+						? (long?)streamVersion
+						: null;
+					return res;
+				}
+			}
+
+			return null;
 		}
 
 		static Func<UriTemplateMatch, Operation> WithParameters(OperationDefinition definition) {
