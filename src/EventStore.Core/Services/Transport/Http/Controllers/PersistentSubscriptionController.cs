@@ -66,31 +66,109 @@ namespace EventStore.Core.Services.Transport.Http.Controllers {
 			RegisterUrlBased(service, "/subscriptions/{stream}/{subscription}/nack?ids={messageids}&action={action}",
 				HttpMethod.Post, WithParameters(Operations.Subscriptions.ProcessMessages), NackMessages);
 			//map view parked messages
-			Register(service, "/subscriptions/viewparkedmessages/{stream}/{group}", HttpMethod.Get,
-				ViewParkedMessages, Codec.NoCodecs, AtomCodecs, WithParameters(Operations.Subscriptions.ProcessMessages));
+			Register(service, "/subscriptions/viewparkedmessages/{stream}/{group}/{event}/{count}?embed={embed}", HttpMethod.Get,
+				ViewParkedMessages, Codec.NoCodecs, AtomCodecs, WithParameters(Operations.Subscriptions.Statistics));
+			Register(service, "/subscriptions/viewparkedmessages/{stream}/{group}?embed={embed}", HttpMethod.Get,
+				ViewParkedMessages, Codec.NoCodecs, AtomCodecs, WithParameters(Operations.Subscriptions.Statistics));
 		}
+		//work in progress
+		//https://localhost:2113/streams/%24persistentsubscription-test-stream%3A%3AGroup2-parked/
+		//curl -v https://localhost:2113/streams/%24persistentsubscription-test-stream%3A%3AGroup2-parked/0/backward/1 --insecure -u admin:changeit -H "Accept:application/vnd.eventstore.atom+json"
 
 		private void ViewParkedMessages(HttpEntityManager http, UriTemplateMatch match) {
 			//var stream = Uri.EscapeDataString(match.BoundVariables["stream"]);
 			//var groupname = Uri.EscapeDataString(match.BoundVariables["group"]);
 			var stream = match.BoundVariables["stream"];
 			var groupname = match.BoundVariables["group"];
+			var evNum = match.BoundVariables["event"];
+			var cnt = match.BoundVariables["count"];
 
 			var parkedMessageUri = MakeUrl(http,
 				string.Format(parkedMessageUriTemplate, stream, groupname));
 
-			stream = "$persistentsubscription" + stream + "::" + groupname+"-parked";
+			stream = "$persistentsubscription-" + stream + "::" + groupname+"-parked";
 			
 			Log.Information("parked message uri {parkedMessageUri}.", parkedMessageUri);
 			Log.Information("stream {stream}.", stream);
+			
+			long eventNumber = -1;
+			int count = AtomSpecs.FeedPageSize;
+			var embed = GetEmbedLevel(http, match);
+
+			if (stream.IsEmptyString()) {
+				SendBadRequest(http, string.Format("Invalid stream name '{0}'", stream));
+				return;
+			}
+
+			if (evNum != null && evNum != "head" && (!long.TryParse(evNum, out eventNumber) || eventNumber < 0)) {
+				SendBadRequest(http, string.Format("'{0}' is not valid event number", evNum));
+				return;
+			}
+
+			if (cnt.IsNotEmptyString() && (!int.TryParse(cnt, out count) || count <= 0)) {
+				SendBadRequest(http, string.Format("'{0}' is not valid count. Should be positive integer", cnt));
+				return;
+			}
+
+			bool resolveLinkTos;
+			if (!GetResolveLinkTos(http, out resolveLinkTos, true)) {
+				SendBadRequest(http, string.Format("{0} header in wrong format.", SystemHeaders.ResolveLinkTos));
+				return;
+			}
+
+			if (!GetRequireLeader(http, out var requireLeader)) {
+				SendBadRequest(http, string.Format("{0} header in wrong format.", SystemHeaders.RequireLeader));
+				return;
+			}
+
+			bool headOfStream = eventNumber == -1;
+			GetStreamEventsBackward(http, stream, eventNumber, count, resolveLinkTos, requireLeader, headOfStream,
+				embed);
+		}
+		private void GetStreamEventsBackward(HttpEntityManager manager, string stream, long eventNumber, int count,
+			bool resolveLinkTos, bool requireLeader, bool headOfStream, EmbedLevel embed) {
 			var envelope = new SendToHttpEnvelope(_networkSendQueue,
-				http,
+				manager,
 				(ent, msg) =>
-					Format.GetStreamEventsBackward(ent, msg, EmbedLevel.None, true),
-				(args, msg) => Configure.GetStreamEventsBackward(args, msg, true));
+					Format.GetStreamEventsBackward(ent, msg, embed, headOfStream),
+				(args, msg) => Configure.GetStreamEventsBackward(args, msg, headOfStream));
 			var corrId = Guid.NewGuid();
-			Publish(new ClientMessage.ReadStreamEventsBackward(corrId, corrId, envelope, stream, 0, AtomSpecs.FeedPageSize,
-				true, true, GetETagStreamVersion(http), http.User));
+			Publish(new ClientMessage.ReadStreamEventsBackward(corrId, corrId, envelope, stream, eventNumber, count,
+				resolveLinkTos, requireLeader, GetETagStreamVersion(manager), manager.User));
+		}
+		private bool GetRequireLeader(HttpEntityManager manager, out bool requireLeader) {
+			requireLeader = false;
+			
+			var onlyLeader = manager.HttpEntity.Request.GetHeaderValues(SystemHeaders.RequireLeader);
+			var onlyMaster = manager.HttpEntity.Request.GetHeaderValues(SystemHeaders.RequireMaster);
+			
+			if (StringValues.IsNullOrEmpty(onlyLeader) && StringValues.IsNullOrEmpty(onlyMaster))
+				return true;
+		
+			if (string.Equals(onlyLeader, "True", StringComparison.OrdinalIgnoreCase) ||
+			    string.Equals(onlyMaster, "True", StringComparison.OrdinalIgnoreCase)) {
+				requireLeader = true;
+				return true;
+			}
+
+			return string.Equals(onlyLeader, "False", StringComparison.OrdinalIgnoreCase) ||
+			       string.Equals(onlyLeader, "False", StringComparison.OrdinalIgnoreCase);
+		}
+		private bool GetResolveLinkTos(HttpEntityManager manager, out bool resolveLinkTos, bool defaultOption = false) {
+			resolveLinkTos = defaultOption;
+			var linkToHeader = manager.HttpEntity.Request.GetHeaderValues(SystemHeaders.ResolveLinkTos);
+			if (StringValues.IsNullOrEmpty(linkToHeader))
+				return true;
+			if (string.Equals(linkToHeader, "False", StringComparison.OrdinalIgnoreCase)) {
+				return true;
+			}
+
+			if (string.Equals(linkToHeader, "True", StringComparison.OrdinalIgnoreCase)) {
+				resolveLinkTos = true;
+				return true;
+			}
+
+			return false;
 		}
 		private long? GetETagStreamVersion(HttpEntityManager manager) {
 			var etag = manager.HttpEntity.Request.GetHeaderValues("If-None-Match");
