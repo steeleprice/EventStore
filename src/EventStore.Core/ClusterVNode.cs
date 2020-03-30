@@ -39,6 +39,8 @@ using EventStore.Core.Services.PersistentSubscription.ConsumerStrategy;
 using System.Threading.Tasks;
 using EventStore.Core.Authorization;
 using EventStore.Core.Cluster;
+using EventStore.Plugins.Authentication;
+using EventStore.Plugins.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using ILogger = Serilog.ILogger;
 using MidFunc = System.Func<
