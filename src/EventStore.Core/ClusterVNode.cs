@@ -368,8 +368,7 @@ namespace EventStore.Core {
 			// AUTHENTICATION INFRASTRUCTURE - delegate to plugins
 			_authenticationProvider =
 				vNodeSettings.AuthenticationProviderFactory.GetFactory(components).Build(
-					vNodeSettings.LogFailedAuthenticationAttempts);
-
+					vNodeSettings.LogFailedAuthenticationAttempts, Log);
 			_authenticationProvider.Initialize().ContinueWith(t => {
 				if (t.Exception != null) {
 					_mainQueue.Publish(new AuthenticationMessage.AuthenticationProviderInitializationFailed());
