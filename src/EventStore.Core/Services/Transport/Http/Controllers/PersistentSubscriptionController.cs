@@ -71,25 +71,14 @@ namespace EventStore.Core.Services.Transport.Http.Controllers {
 			Register(service, "/subscriptions/viewparkedmessages/{stream}/{group}?embed={embed}", HttpMethod.Get,
 				ViewParkedMessages, Codec.NoCodecs, AtomCodecs, WithParameters(Operations.Subscriptions.Statistics));
 		}
-		//work in progress
-		//https://localhost:2113/streams/%24persistentsubscription-test-stream%3A%3AGroup2-parked/
-		//curl -v https://localhost:2113/streams/%24persistentsubscription-test-stream%3A%3AGroup2-parked/0/backward/1 --insecure -u admin:changeit -H "Accept:application/vnd.eventstore.atom+json"
-
 		private void ViewParkedMessages(HttpEntityManager http, UriTemplateMatch match) {
-			//var stream = Uri.EscapeDataString(match.BoundVariables["stream"]);
-			//var groupname = Uri.EscapeDataString(match.BoundVariables["group"]);
 			var stream = match.BoundVariables["stream"];
 			var groupname = match.BoundVariables["group"];
 			var evNum = match.BoundVariables["event"];
 			var cnt = match.BoundVariables["count"];
 
-			var parkedMessageUri = MakeUrl(http,
-				string.Format(parkedMessageUriTemplate, stream, groupname));
-
 			stream = "$persistentsubscription-" + stream + "::" + groupname+"-parked";
 			
-			Log.Information("parked message uri {parkedMessageUri}.", parkedMessageUri);
-			Log.Information("stream {stream}.", stream);
 			
 			long eventNumber = -1;
 			int count = AtomSpecs.FeedPageSize;
